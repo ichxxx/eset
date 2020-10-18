@@ -153,13 +153,12 @@ func(es *ExpirableSet) Intersect(other *ExpirableSet) *ExpirableSet {
 	newEs := New()
 	var lagerEs, smallEs *ExpirableSet
 	if es.largerThan(other) {
-		lagerEs = es
-		smallEs = other
+		lagerEs, smallEs = es, other
 	} else {
-		lagerEs = other.Clone()
-		smallEs = es
+		lagerEs, smallEs = other, es
 	}
 
+	lagerEs.mutex.Lock()
 	smallEs.mutex.Lock()
 	for elem := range smallEs.elems {
 		if lagerEs.contains(elem) {
@@ -167,6 +166,7 @@ func(es *ExpirableSet) Intersect(other *ExpirableSet) *ExpirableSet {
 		}
 	}
 
+	lagerEs.mutex.Unlock()
 	smallEs.mutex.Unlock()
 	return newEs
 }
@@ -213,7 +213,7 @@ func(es *ExpirableSet) Equal(other *ExpirableSet) bool {
 
 func(es *ExpirableSet) Clone() *ExpirableSet {
 	return &ExpirableSet{
-		elems: es.elems,
+		elems:    es.elems,
 		capacity: es.capacity,
 	}
 }
@@ -233,14 +233,9 @@ func(b *base) isExpired() bool {
 
 
 func compareAndGet(one, other *ExpirableSet) (*ExpirableSet, *ExpirableSet) {
-	var lagerEs, smallEs *ExpirableSet
 	if one.largerThan(other) {
-		lagerEs = one.Clone()
-		smallEs = other
+		return one.Clone(), other
 	} else {
-		lagerEs = other.Clone()
-		smallEs = one
+		return other.Clone(), one
 	}
-
-	return lagerEs, smallEs
 }
