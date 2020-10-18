@@ -67,6 +67,11 @@ func(es *ExpirableSet) delExpiredElems() {
 }
 
 
+func(es *ExpirableSet) largerThan(other *ExpirableSet) bool {
+	return len(es.elems) > len(other.elems)
+}
+
+
 func(es *ExpirableSet) Add(elem interface{}) {
 	es.mutex.Lock()
 	defer es.mutex.Unlock()
@@ -144,14 +149,13 @@ func(es *ExpirableSet) Union(other *ExpirableSet) *ExpirableSet {
 	defer es.mutex.Unlock()
 	defer other.mutex.Unlock()
 
-	newEs := New()
-	newEs.elems = es.elems
-	for elem, base := range other.elems {
-		if !es.contains(elem) {
-			newEs.elems[elem] = base
+	lagerEs, smallEs := compareAndGet(es, other)
+	for elem := range smallEs.elems {
+		if !lagerEs.contains(elem) {
+			lagerEs.elems[elem] = lagerEs.elems[elem]
 		}
 	}
-	return newEs
+	return lagerEs
 }
 
 
@@ -162,9 +166,18 @@ func(es *ExpirableSet) Intersect(other *ExpirableSet) *ExpirableSet {
 	defer other.mutex.Unlock()
 
 	newEs := New()
-	for elem := range other.elems {
-		if es.contains(elem) {
-			newEs.elems[elem] = es.elems[elem]
+	var lagerEs, smallEs *ExpirableSet
+	if es.largerThan(other) {
+		lagerEs = es
+		smallEs = other
+	} else {
+		lagerEs = other.Clone()
+		smallEs = es
+	}
+
+	for elem := range smallEs.elems {
+		if lagerEs.contains(elem) {
+			newEs.elems[elem] = smallEs.elems[elem]
 		}
 	}
 	return newEs
@@ -177,16 +190,15 @@ func(es *ExpirableSet) Different(other *ExpirableSet) *ExpirableSet {
 	defer es.mutex.Unlock()
 	defer other.mutex.Unlock()
 
-	newEs := New()
-	newEs.elems = es.elems
-	for elem := range other.elems {
-		if es.contains(elem) {
-			delete(newEs.elems, elem)
+	lagerEs, smallEs := compareAndGet(es, other)
+	for elem := range smallEs.elems {
+		if lagerEs.contains(elem) {
+			delete(lagerEs.elems, elem)
 		} else {
-			newEs.elems[elem] = other.elems[elem]
+			lagerEs.elems[elem] = lagerEs.elems[elem]
 		}
 	}
-	return newEs
+	return lagerEs
 }
 
 
@@ -229,4 +241,18 @@ func(es *ExpirableSet) Size() int {
 
 func(b *base) isExpired() bool {
 	return b != nil && b.time.Before(time.Now())
+}
+
+
+func compareAndGet(one, other *ExpirableSet) (*ExpirableSet, *ExpirableSet) {
+	var lagerEs, smallEs *ExpirableSet
+	if one.largerThan(other) {
+		lagerEs = one.Clone()
+		smallEs = other
+	} else {
+		lagerEs = other.Clone()
+		smallEs = one
+	}
+
+	return lagerEs, smallEs
 }
