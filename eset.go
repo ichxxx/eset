@@ -166,6 +166,8 @@ func(es *ExpirableSet) IsSubSet(other *ExpirableSet) bool {
 	other.mutex.RLock()
 	for elem := range es.elems {
 		if !other.contains(elem) {
+			es.mutex.RUnlock()
+			other.mutex.RUnlock()
 			return false
 		}
 	}
