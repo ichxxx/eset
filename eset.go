@@ -33,7 +33,7 @@ func NewWithCapacity(cap int) *ExpirableSet {
 
 
 func(es *ExpirableSet) init() {
-	if es.capacity != 0 {
+	if es.capacity >= 0 {
 		es.elems = make(map[interface{}]*base, es.capacity)
 	} else {
 		es.elems = make(map[interface{}]*base)
