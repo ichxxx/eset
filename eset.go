@@ -4,7 +4,10 @@ import (
 	"errors"
 	"sync"
 	"time"
+	"unsafe"
 )
+
+const FACTOR = 6.5
 
 type ExpirableSet struct {
 	elems    map[interface{}]*base
@@ -16,6 +19,13 @@ type base struct {
 	expireTime time.Time
 }
 
+// the underlying struct of map
+type hmap struct {
+	count      int   // live cells == size of ma
+	flags      uint8
+	B          uint8 // log_2 of buckets (can hold up to loadFactor * 2^B items)
+}
+
 
 func New() *ExpirableSet {
 	es := &ExpirableSet{}
@@ -24,16 +34,28 @@ func New() *ExpirableSet {
 }
 
 
-func NewWithCapacity(cap int) *ExpirableSet {
+// Assigns a initial capacity to the set
+// to reduce the performance consumption caused by expansion.
+// Because the implementation of eset is map,
+// its capacity expansion mechanism is the same as map,
+// that is, when (capacity / 2^hmap.B) > loadFactor,
+// the expansion will be triggered.
+func NewWithCapacity(capacity int) *ExpirableSet{
 	es := &ExpirableSet{}
-	es.capacity = cap
+	if capacity <= 8 {
+		es.capacity = 8
+	} else {
+		// 13 is FACTOR * 2
+		es.capacity = FACTOR * 2 << (capacity / 13)
+	}
+
 	es.init()
 	return es
 }
 
 
 func(es *ExpirableSet) init() {
-	if es.capacity >= 0 {
+	if es.capacity > 0 {
 		es.elems = make(map[interface{}]*base, es.capacity)
 	} else {
 		es.elems = make(map[interface{}]*base)
@@ -73,6 +95,9 @@ func(es *ExpirableSet) largerThan(other *ExpirableSet) bool {
 }
 
 
+// Add an element to the set normally.
+// If the element is existed,
+// its expiration time will be cleared if it has.
 func(es *ExpirableSet) Add(elem interface{}) {
 	es.mutex.Lock()
 	es.add(elem, nil)
@@ -80,6 +105,9 @@ func(es *ExpirableSet) Add(elem interface{}) {
 }
 
 
+// Add an element to the set with an expiration time.
+// If the element is existed,
+// its expiration time will be reset to new.
 func(es *ExpirableSet) AddWithExpire(elem interface{}, expireTime time.Duration) {
 	es.mutex.Lock()
 	es.add(elem, es.buildBase(expireTime))
@@ -87,14 +115,26 @@ func(es *ExpirableSet) AddWithExpire(elem interface{}, expireTime time.Duration)
 }
 
 
-func(es *ExpirableSet) Update(oldElem interface{}, newElem interface{}) {
-	es.mutex.Lock()
-	es.elems[newElem] = es.elems[oldElem]
-	delete(es.elems, oldElem)
-	es.mutex.Unlock()
+// Update an existed element in the set,
+// and its expiration time will be inherited.
+// Returns an error if the element doesn't exist.
+func(es *ExpirableSet) Update(old interface{}, new interface{}) (err error) {
+	oldElem, isExist := es.elems[old]
+	if isExist {
+		es.mutex.Lock()
+		es.elems[new] = oldElem
+		delete(es.elems, old)
+		es.mutex.Unlock()
+	} else {
+		err = errors.New("elem doesn't exist")
+	}
+
+	return
 }
 
 
+// Remove an element in the set.
+// If the element doesn't exist, nothing will happen.
 func(es *ExpirableSet) Remove(elem interface{}) {
 	es.mutex.Lock()
 	delete(es.elems, elem)
@@ -102,11 +142,37 @@ func(es *ExpirableSet) Remove(elem interface{}) {
 }
 
 
-func(es *ExpirableSet) GetCapacity() int {
-	return es.capacity
+// This method can release the deleted elements in memory.
+// Although the manually removed and
+// expired elements disappear in the set,
+// they may not be released in memory for some reason.
+func(es *ExpirableSet) ClearEvictedElems() {
+	newElems := make(map[interface{}]*base)
+	es.mutex.Lock()
+	for elem, base := range es.elems {
+		newElems[elem] = base
+	}
+
+	es.elems = newElems
+	es.mutex.Unlock()
 }
 
 
+// Returns size and capacity of the set.
+func(es *ExpirableSet) Info() (size, capacity int) {
+	hmap := *(**hmap)(unsafe.Pointer(&es.elems))
+	if hmap.B == 0 {
+		return hmap.count, 8
+	}
+
+	return hmap.count, FACTOR * 2 << (int(hmap.B)-1)
+}
+
+
+
+// Get ttl of the element.
+// Returns an error if the element doesn't exist,
+// or if the element doesn't have ttl.
 func(es *ExpirableSet) GetElemTTL(elem interface{}) (ttl float64, err error) {
 	es.mutex.RLock()
 	base, isExist := es.elems[elem]
@@ -128,6 +194,7 @@ func(es *ExpirableSet) GetElemTTL(elem interface{}) (ttl float64, err error) {
 }
 
 
+// Returns a slice that has all unexpired elements.
 func(es *ExpirableSet) GetAll() []interface{} {
 	es.mutex.Lock()
 	var tempSlice []interface{}
@@ -157,6 +224,8 @@ func(es *ExpirableSet) Clear() {
 }
 
 
+// Returns true if the set is
+// the subset of the other set.
 func(es *ExpirableSet) IsSubSet(other *ExpirableSet) bool {
 	if es.largerThan(other) {
 		return false
@@ -232,6 +301,8 @@ func(es *ExpirableSet) Different(other *ExpirableSet) *ExpirableSet {
 }
 
 
+// Ignore the order to determine
+// whether the elements in the set are equal.
 func(es *ExpirableSet) Equal(other *ExpirableSet) bool {
 	if len(es.elems) != len(other.elems) {
 		return false
@@ -270,6 +341,7 @@ func(es *ExpirableSet) Size() int {
 }
 
 
+// Do something for each elements in the set.
 func(es *ExpirableSet) ForEach(handler func(interface{})) {
 	es.mutex.Lock()
 	for elem, base := range es.elems {
@@ -289,6 +361,8 @@ func(b *base) isExpired() bool {
 }
 
 
+// Compare two set's size.
+// Returns the bigger one's clone and the smaller one.
 func compareAndGet(one, other *ExpirableSet) (*ExpirableSet, *ExpirableSet) {
 	if one.largerThan(other) {
 		return one.Clone(), other
